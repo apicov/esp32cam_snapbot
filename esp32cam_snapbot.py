@@ -35,11 +35,11 @@ def on_message(client, userdata, message):
     # Prepare the image to bytes for sending via Telegram
     img_bytes = BytesIO()
 
-    # Decode base64 to get raw RGB data (160x120x3)
-    rgb_data = base64.b64decode(message.payload)
+    # Decode base64 to get JPEG data
+    jpeg_data = base64.b64decode(message.payload)
 
-    # Create PIL Image from raw RGB data
-    img = Image.frombytes('RGB', (160, 120), rgb_data)
+    # Open JPEG image and convert to send via Telegram
+    img = Image.open(BytesIO(jpeg_data))
     img.save(img_bytes, format='JPEG')
     img_bytes.seek(0)
 
