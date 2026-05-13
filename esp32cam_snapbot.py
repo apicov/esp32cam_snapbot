@@ -28,38 +28,51 @@ def on_message(client, userdata, message):
     from the MQTT CLIENT. If the message is an image, then that
     image forwarded
     """
-    if message.topic != MQTT_TOPIC_IMG:
-        print(f'Incoming MQTT message from unsupported topic {message.topic}')
-        return
-
-    # Prepare the image to bytes for sending via Telegram
-    img_bytes = BytesIO()
-
-    # Decode base64 to get JPEG data
-    jpeg_data = base64.b64decode(message.payload)
-
-    # Open JPEG image and convert to send via Telegram
-    img = Image.open(BytesIO(jpeg_data))
-    img.save(img_bytes, format='JPEG')
-    img_bytes.seek(0)
-
-    # XXX: Without a retry mechanism, then it's OK to drop the
-    # chat_id from the snap_requests list
-    chat_id = snap_requests.pop(0)
-
     try:
-        asyncio.run_coroutine_threadsafe(
-            send_photo_async(chat_id, img_bytes), telegram_event_loop)
+        if message.topic != MQTT_TOPIC_IMG:
+            print(f'Incoming MQTT message from unsupported topic {message.topic}')
+            return
+
+        # Decode base64 to get JPEG data and prepare bytes for Telegram
+        try:
+            jpeg_data = base64.b64decode(message.payload)
+            img = Image.open(BytesIO(jpeg_data))
+            img_bytes = BytesIO()
+            img.save(img_bytes, format='JPEG')
+        except Exception as e:
+            print(f"ERROR decoding image payload: {e}")
+            return
+
+        if snap_requests:
+            # Response to an explicit /snap command
+            chat_id = snap_requests.pop(0)
+            recipients = [chat_id]
+        else:
+            # Interrupt-triggered: alert all allowed users
+            print("Interrupt-triggered image received, alerting all allowed users")
+            recipients = list(allowed_users)
+
+        for chat_id in recipients:
+            img_bytes.seek(0)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    send_photo_async(chat_id, img_bytes), telegram_event_loop)
+            except Exception as e:
+                print(f"Error scheduling coroutine for {chat_id}: {e}")
+
     except Exception as e:
-        print(f"Error scheduling coroutine: {e}")
+        print(f"ERROR in on_message, message dropped: {e}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for the "start" command. It replies with the text "Hola".
     """
-    id = update.message.from_user.id;
-    await update.message.reply_text(f"Hola {id}")
+    id = update.message.from_user.id
+    try:
+        await update.message.reply_text(f"Hola {id}")
+    except Exception as e:
+        print(f"{id}: ERROR sending start reply: {e}")
 
 
 async def snap(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -70,16 +83,23 @@ async def snap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     id = update.message.from_user.id
     print(f"{id}: Received 'snap' command request via Telegram")
 
-    if (id not in allowed_users):
+    if id not in allowed_users:
         print(f"user {id} isn't allowed to use this command")
-    else:
+        return
+
+    try:
         # ensure that the request is recorded and enqueued
         # in the same order
         async with enqueue_lock:
             snap_requests.append(update.message.chat_id)
-            mqtt_client.publish(MQTT_TOPIC_CMD, "snap")
-
+            try:
+                mqtt_client.publish(MQTT_TOPIC_CMD, "snap")
+            except Exception as e:
+                snap_requests.pop()  # rollback enqueue if publish failed
+                raise
         await update.message.reply_text("Snap command sent!")
+    except Exception as e:
+        print(f"{id}: ERROR handling snap command: {e}")
 
 
 if __name__ == '__main__':
